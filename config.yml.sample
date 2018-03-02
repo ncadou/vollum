@@ -1,0 +1,70 @@
+defaults:
+  base_link_dir: ~/.mnt
+  password_manager: pass
+
+  _lock: &LOCK
+    on_add: gnome-screensaver-command -d; xset dpms force on
+    on_remove: desktop-lock
+
+  _usb_safe: &USB_SAFE
+    <<: *LOCK
+    auto_mount: true
+    sync: true
+
+devices:
+  tinyusb:
+    auto_mount: true
+    uuid: "1234-5678"
+    type: vfat
+    tag: usb
+
+  bigusb:
+    auto_mount: true
+    uuid: "2234-5678"
+    type: vfat
+    tag: usb
+
+  usbsafe:
+    <<: *USB_SAFE
+    label: somelabel
+    uuid: "3234-5678"
+    type: vfat
+    tag: usb
+    post_mount_cmd: >
+      rsync -a --delete --no-o --no-p --no-g --safe-links --modify-window 1
+      /some/local/backups  {usbsafe}/backups
+
+  usb32gmini:
+    auto_mount: true
+    uuid: "4234-5678"
+    type: vfat
+    tag: usb
+
+  smallhdd:
+    uuid: 12345678-9abc-def0-1234-56789abcdef0
+    auto_mount: true
+    type: ext2
+    tag: usb
+
+  bighdd:
+    label: somelabel2
+    uuid: 22345678-9abc-def0-1234-56789abcdef0
+    type: ext4
+    key: password-store/path/to/passphrase
+    auto_mount: true
+    tag: usb
+
+  secrets:
+    parent: usbsafe
+    type: command
+    env:
+      GNUPGHOME: ~/.gnupg-custom
+      PASSWORD_STORE_DIR: ~/.password-store-custom
+    mount_cmd: >
+      tomb open
+      -f {usbsafe}/{name}.tomb
+      -k {usbsafe}/{name}.tomb.key
+      --unsafe --tomb-pwd "$(pass {name})"
+    umount_cmd: tomb close {name}
+
+# vim: ft=yaml
