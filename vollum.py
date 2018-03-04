@@ -9,7 +9,7 @@ from tempfile import mkstemp
 
 import click
 import yaml
-from bunch import Bunch, bunchify
+from munch import Munch, munchify
 from pyudev import Context, Monitor
 
 ACTIONS = dict(add='on_add', remove='on_remove')
@@ -20,14 +20,8 @@ click.disable_unicode_literals_warning = True
 MOUNTS_RE = re.compile(
     r'^([^\s]+)\s+on\s+([^\s]+)\s+type\s+([^\s]+)\s+\((.+)\)$')
 
-deps = bunchify(dict(parents=dict(), children=dict()))
+deps = munchify(dict(parents=dict(), children=dict()))
 settings = None
-
-# Needed system packages (Ubuntu):
-# - cryptsetup
-# - pmount
-# - python-pip
-# - python-virtualenv
 
 
 @click.group()
@@ -38,9 +32,9 @@ def cli(ctx, config='config.yml'):
     """Manipulate storage devices."""
     global settings
     with open(config) as config:
-        settings = bunchify(yaml.load(config.read()))
+        settings = munchify(yaml.load(config.read()))
     defaults = settings.defaults
-    for name, conf in settings.devices.iteritems():
+    for name, conf in settings.devices.items():
         if name.startswith('_'):
             continue
 
@@ -52,7 +46,7 @@ def cli(ctx, config='config.yml'):
         if 'key' in conf:
             conf.password_manager = defaults.password_manager
     uuids = dict((conf.uuid, name)
-                 for name, conf in settings.devices.iteritems()
+                 for name, conf in settings.devices.items()
                  if 'uuid' in conf)
     ctx.obj.update(uuids=uuids)
 
@@ -227,12 +221,12 @@ class PMount(Volume):
 def call_cmd(name, command, env=None, **vars):
     """Unmount device filesystem."""
     vars = dict(name=name, **vars)
-    for _name, _conf in settings.devices.iteritems():
+    for _name, _conf in settings.devices.items():
         if 'label' in _conf:
             vars[_name] = get_mount_target(devname=None, label=_conf.label)
     command = command.format(**vars)
     if env is not None:
-        for k, v in env.iteritems():
+        for k, v in env.items():
             env[k] = expanduser(v)
         env = dict(os.environ.items() + env.items())
     return call(command, env=env, shell=True)
@@ -248,8 +242,8 @@ def get_mount_info(devname, label=None):
     mount_point = get_mount_target(devname, label)
     mounts = check_output('mount | grep " %s " || :' % mount_point, shell=True)
     if mounts:
-        return Bunch(zip(('device', 'mount_point', 'type', 'options'),
-                         MOUNTS_RE.match(mounts).groups()))
+        return Munch(zip(('device', 'mount_point', 'type', 'options'),
+                         MOUNTS_RE.match(mounts.decode()).groups()))
 
 
 def _symlink(conf, devname, label, remove=False):
