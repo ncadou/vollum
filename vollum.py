@@ -23,8 +23,13 @@ MOUNTS_RE = re.compile(
 deps = bunchify(dict(parents=dict(), children=dict()))
 settings = None
 
+# Needed system packages (Ubuntu):
+# - cryptsetup
+# - pmount
+# - python-pip
+# - python-virtualenv
 
-# TODO: move cli* to their own module.
+
 @click.group()
 @click.option('-c', '--config', envvar='CONFIG',
               help='Name of the configuration file to use.')
@@ -61,7 +66,7 @@ def cli_mount(ctx, name):
     if name in deps.parents:
         ctx.invoke(cli_mount, name=deps.parents[name])
     if not get_mount_info(devname, label):
-        mount(conf, name, devname, label=label)
+        PMount(conf, name, devname, label=label).mount()
 
 
 @cli.command('umount')
@@ -74,7 +79,7 @@ def cli_umount(ctx, name):
         ctx.invoke(cli_umount, name=deps.children[name])
     info = get_mount_info(devname, label)
     if info:
-        umount(conf, name, info.device, label=label)
+        PMount(conf, name, info.device, label=label).umount()
 
 
 @cli.command('watch')
@@ -99,11 +104,12 @@ def cli_watch(ctx):
             print('Running command: %s' % command)
             call(command, shell=True)
         if dev.action == 'add' and conf.get('auto_mount'):
-            mount(conf, name, devname, label=label, error='ignore')
+            PMount(conf, name, devname, label=label).mount(error='ignore')
         if dev.action == 'remove':
             info = get_mount_info(devname, label)
             if info:
-                umount(conf, name, info.device, label=label, error='ignore')
+                PMount(conf, name, info.device, label=label).umount(
+                    error='ignore')
 
     poll(handler)
 
@@ -137,57 +143,85 @@ def find(ctx, name):
     sys.exit(1)
 
 
-def mount(conf, name, devname, label=None, args=None, **kw):
-    """Mount device filesystem."""
-    args = (('-t', conf.get('type', 'vfat')) +
-            (conf.get('sync', ()) and ('--sync',)) +
-            (args or ()))
-    if 'key' in conf:
-        filehandle, tmpfile = mkstemp()
-        password_command = ' '.join([conf.password_manager, conf.key])
-        try:
-            passwd = check_output(password_command, shell=True).strip()
-        except CalledProcessError as e:
-            print('Unable to get password for device %s.' % devname)
-            if kw.get('error') == 'ignore':
-                return
+class Volume(object):
+    def __init__(self, conf, name, devname, label=None, **kw):
+        self.conf = conf
+        self.name = name
+        self.devname = devname
+        self.label = label
+        self.kw = kw
 
-            else:
-                sys.exit(e.returncode)
+    def mount(self):
+        pass
 
-        os.write(filehandle, passwd)
-        os.close(filehandle)
-        args += ('-p', tmpfile)
-    env = dict(MOUNT_POINT=get_mount_target(devname, label))
-    env.update(conf.get('env', dict()))
-    if 'mount_cmd' in conf:
-        result = call_cmd(name, conf.mount_cmd, env=env)
-        if result and kw.get('error') == 'exit':
+    def umount(self):
+        pass
+
+
+class PMount(Volume):
+    def mount(self, *args, **kw):
+        """Mount device filesystem."""
+        args = (('-t', self.conf.get('type', 'vfat')) +
+                (self.conf.get('sync', ()) and ('--sync',)) + args)
+        if 'key' in self.conf:
+            filehandle, tmpfile = mkstemp()
+            password_command = ' '.join([self.conf.password_manager,
+                                         self.conf.key])
+            try:
+                passwd = check_output(password_command, shell=True).strip()
+            except CalledProcessError as e:
+                print('Unable to get password for device %s.' % self.devname)
+                if kw.get('error') == 'ignore':
+                    return
+
+                else:
+                    sys.exit(e.returncode)
+
+            os.write(filehandle, passwd)
+            os.close(filehandle)
+            args += ('-p', tmpfile)
+        env = dict(MOUNT_POINT=get_mount_target(self.devname, self.label))
+        env.update(self.conf.get('env', dict()))
+        if 'mount_cmd' in self.conf:
+            result = call_cmd(self.name, self.conf.mount_cmd, env=env)
+            if result and kw.get('error') == 'exit':
+                exit(result)
+
+        else:
+            self._pmount('mount', args, **kw)
+        if 'key' in self.conf:
+            os.unlink(tmpfile)
+        if 'post_mount_cmd' in self.conf:
+            result = call_cmd(self.name, self.conf.post_mount_cmd, env=env)
+            if result and kw.get('error') == 'exit':
+                exit(result)
+
+        _symlink(self.conf, self.devname, self.label)
+
+    def umount(self, *args, **kw):
+        """Unmount device filesystem."""
+        if 'umount_cmd' in self.conf:
+            result = call_cmd(self.name, self.conf.umount_cmd)
+            if result and kw.get('error') == 'exit':
+                exit(result)
+
+        else:
+            self._pmount('umount', args, **kw)
+        _symlink(self.conf, self.devname, self.label, remove=True)
+
+    def _pmount(self, action, args, error='exit'):
+        """Run pmount on device filesystem."""
+        args = ('p%s' % action,) + args + (self.devname,)
+        if action == 'mount':
+            if self.label:
+                args += (self.label,)
+            msg = 'Mounting %s on %s'
+        else:
+            msg = 'Unmounting %s from %s'
+        print(msg % (self.devname, get_mount_target(self.devname, self.label)))
+        result = call(args)
+        if result and error == 'exit':
             exit(result)
-
-    else:
-        _pmount(conf, name, devname, 'mount', label=label, args=args, **kw)
-    if 'key' in conf:
-        os.unlink(tmpfile)
-    if 'post_mount_cmd' in conf:
-        result = call_cmd(name, conf.post_mount_cmd, env=env)
-        if result and kw.get('error') == 'exit':
-            exit(result)
-
-    _symlink(conf, devname, label)
-
-
-def umount(conf, name, devname, label=None, args=None, **kw):
-    """Unmount device filesystem."""
-    if 'umount_cmd' in conf:
-        result = call_cmd(name, conf.umount_cmd)
-        if result and kw.get('error') == 'exit':
-            exit(result)
-
-    else:
-        _pmount(conf, name, devname, 'umount', label=label,
-                args=args or (), **kw)
-    _symlink(conf, devname, label, remove=True)
 
 
 def call_cmd(name, command, env=None, **vars):
@@ -202,21 +236,6 @@ def call_cmd(name, command, env=None, **vars):
             env[k] = expanduser(v)
         env = dict(os.environ.items() + env.items())
     return call(command, env=env, shell=True)
-
-
-def _pmount(conf, name, devname, action, label=None, args=None, error='exit'):
-    """Run pmount on device filesystem."""
-    args = ('p%s' % action,) + (args or ()) + (devname,)
-    if action == 'mount':
-        if label:
-            args += (label,)
-        msg = 'Mounting %s on %s'
-    else:
-        msg = 'Unmounting %s from %s'
-    print(msg % (devname, get_mount_target(devname, label)))
-    result = call(args)
-    if result and error == 'exit':
-        exit(result)
 
 
 def get_mount_target(devname, label=None):
@@ -235,12 +254,15 @@ def get_mount_info(devname, label=None):
 
 def _symlink(conf, devname, label, remove=False):
     """Create a symlink, cleaning up first."""
+    return
+
     linkpath = conf.get('symlink')
     if linkpath:
         linkpath = expanduser(linkpath)
         if lexists(linkpath):
             os.unlink(linkpath)
         if not remove:
+            # TODO: handle path errors
             os.symlink(get_mount_target(devname, label), linkpath)
 
 
